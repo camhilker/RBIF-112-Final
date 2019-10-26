@@ -1,0 +1,243 @@
+---
+title: "RBIF 112 Final Project"
+output: html_notebook
+---
+
+
+Introduction:
+
+For my final project in this course, I decided to perform unsupervised clustering analysis to compare the gene expression profiles of MCF-7 breast cancer cells and SKOV3 ovarian cancer cells. According to the American Cancer Society, both breast and ovarian cancer are linked to the BRCA1 and BRCA2 genes, as well as the PTEN gene. Since these genes are suspected to also be linked to other cancers such as thyroid and prostate cancer, I wanted to compare the expression profile to a seemingly unrelated (but also well studied) cancer in order to be able to visualize any stark similarities between breast and ovarian cancer specifically. I chose to look at oral squamous cell carcinoma (OSCC-OC3 cell line) as a "control" comparison. I purposely chose data sets that were collected on the Illumina platform. The SKOV3 and MCF-7 cell data were collected using the Illumina HumanHT-12 v3.0/4.0 expression beadchip, while the OSCC-OC3 cells were processed using Illumina HumanRef-8 v3.0 expression beadchip. I'm not sure if the different versions of Illumina will result in any significant variation.
+
+Since the downloaded files from NCBI/GEO were in .soft format, I searched for the best way to import these into RStudio. I decided to use the GEOquery package from BioConductor.
+```{r}
+BiocManager::install("GEOquery")
+```
+```{r}
+library(Biobase)
+library(GEOquery)
+oral <- getGEO(filename='GDS5625.soft')
+breast <- getGEO(filename='GDS5662.soft')
+ovarian <- getGEO(filename='GDS4814.soft')
+```
+I used the Meta() function that is included in the GEOquery package in order to do some light QC on the data and ensure that the data should be compatible:
+```{r}
+#all are samples of RNA and expression profile arrays
+Meta(ovarian)$sample_type
+Meta(breast)$sample_type
+Meta(oral)$sample_type
+Meta(ovarian)$type
+Meta(breast)$type
+Meta(oral)$type
+
+colnames(Table(ovarian))
+colnames(Table(breast))
+colnames(Table(oral))
+
+Table(ovarian)[1:10,1:5]
+Table(breast)[1:10,1:5]
+Table(oral)[1:10,1:5]
+```
+```{r}
+#create expression set objects for each data set:
+es.br <- GDS2eSet(breast, do.log2=TRUE)
+es.or <- GDS2eSet(oral, do.log2=TRUE)
+es.ov <- GDS2eSet(ovarian, do.log2=TRUE)
+```
+The samples that I chose from each data set were all used as controls in their respective studies, and I used them in order to have a baseline of expression across all cell lines.
+```{r}
+br.samp <- es.br[,c("GSM1686435", "GSM1686439", "GSM1686443")]
+ov.samp <- es.ov[,c("GSM780707", "GSM780708", "GSM780709", "GSM780719", "GSM780720", "GSM780721")]
+or.samp <- es.or[,c("GSM950305", "GSM950306")]
+```
+I also wanted to load in the gene annotations in order to be able to see which genes are highly expressed in each cell type. I got the annotation files from the NCBI/GEO website along with the data files.
+```{r}
+#finding out which annotation files I need to import
+Meta(breast)$platform
+Meta(ovarian)$platform
+Meta(oral)$platform
+
+annot.breast <- getGEO(filename='GPL10558.annot')
+annot.ovarian <- getGEO(filename='GPL6947.annot')
+annot.oral <- getGEO(filename='GPL6883.annot')
+```
+
+
+
+Normalization and Clustering Analysis:
+
+```{r}
+#download packages
+BiocManager::install(c("gplots", "vsn", "topGO", "Rgraphviz", "a4Base"))
+library(vsn)
+library(topGO)
+library(Rgraphviz)
+library(a4Base)
+library(gplots)
+```
+```{r}
+#create data frame that combines the samples and includes the phenotype information by using a4Base package
+
+#pheno data
+pheno.br <- pData(br.samp)["sample"]
+pheno.br$type <- rep("breast", length(pheno.br))
+pheno.ov <- pData(ov.samp)["sample"]
+pheno.ov$type <- rep("ovarian", length(pheno.ov))
+pheno.or <- pData(or.samp)["sample"]
+pheno.or$type <- rep("oral", length(pheno.or))
+pheno.all <- rbind(pheno.br, pheno.ov, pheno.or)
+pheno.br.ov <- rbind(pheno.br, pheno.ov)
+
+#exprs data
+exprs.br <- exprs(br.samp)
+exprs.br <- data.frame(exprs.br)
+exprs.br$id <- rownames(exprs.br)
+exprs.ov <- exprs(ov.samp)
+exprs.ov <- data.frame(exprs.ov)
+exprs.ov$id <- rownames(exprs.ov)
+exprs.br.ov <- merge.data.frame(x=exprs.br, y=exprs.ov, by="id", all=FALSE)
+#reassign rownames and remove id column, remove NAs
+rownames(exprs.br.ov) <- exprs.br.ov[,1]
+exprs.br.ov[,1] <- NULL
+exprs.br.ov <- na.omit(exprs.br.ov)
+
+#create ExpressionSet/SummarizedExperiment
+es.br.ov <- createExpressionSet(exprs=exprs.br.ov, phenoData=pheno.br.ov)
+#sum.br.ov <- makeSummarizedExperimentFromExpressionSet(es.br.ov)
+
+#boxplot shows that the distributions are different between experiments, will this cause problems? The breast tissue appears to have a small variation, while the ovarian tissue seems to be relatively the same across all samples
+boxplot(exprs.br.ov, col="orange", main="boxplot of both breast and ovarian")
+boxplot(exprs.br.ov[,1:3], col="pink", main="boxplot of breast")
+boxplot(exprs.br.ov[,4:9], col="turquoise", main="boxplot of ovarian")
+```
+```{r}
+#corr.dist function that we created in week 4 notes
+corr.dist=function(x) {as.dist(1-cor(t(x)))}
+
+#try first clustering on samples like in notes, not sure why I keep getting errors
+#plot(hclust(corr.dist(t(exprs.br.ov)),method="ward.D2"),label=labels, main="Corr.dist, Ward, all genes")
+#plot(hclust(dist(t(exprs.br.ov)),method="average"),label=labels, main="Euclidean, Average, all genes")
+```
+
+```{r}
+#calclulate variation and mean across all genes, dendogram throws errors
+vars.br.ov=apply(exprs.br.ov,1,var)
+means.br.ov=apply(exprs.br.ov,1,mean)
+select.v=order(vars.br.ov,decreasing=T)[1:300]
+select.m=order(means.br.ov,decreasing=T)[1:300]
+#plot(hclust(corr.dist(t(exprs.br.ov[select.v,])),method="ward.D2"), label=labels, main="Correlation, Ward, top 300 vars")
+```
+
+```{r}
+#heatmap of top 20 vars
+select.1=order(vars.br.ov,decreasing=T)[1:20]
+heatmap.2(as.matrix(exprs.br.ov[select.1,]),trace="none", ColSideColors=c("pink","pink","pink","turquoise","turquoise","turquoise","turquoise","turquoise","turquoise"),margins=c(7,7),Rowv=F,Colv=F, main="top 20 genes, both tissues")
+heatmap.2(as.matrix(exprs.br.ov[select.1,1:3]),trace="none", ColSideColors=c("pink","pink","pink"),margins=c(7,7),Rowv=F,Colv=F, main="top 20 genes, breast")
+heatmap.2(as.matrix(exprs.br.ov[select.1,4:9]),trace="none", ColSideColors=c("turquoise","turquoise","turquoise","turquoise","turquoise","turquoise"),margins=c(7,7),Rowv=F,Colv=F, main="top 20 genes, ovarian")
+```
+Since the heatmap of the top 20 genes when including both tissue types seemed a little off -- all of the genes showed a high expression for the ovarian samples, I decided to draw the heatmaps separately. I'm pretty sure that this is because the expression values were higher overall in the ovarian experiment (as seen in the boxplots previously). The genes expressed separately between the two groups show a similar pattern between the two heat maps.
+
+I compared these heatmaps to a similar analysis of the oral tissue samples:
+```{r}
+#store exprs values and remove NAs
+exprs.or <- exprs(or.samp)
+exprs.or <- na.omit(exprs.or)
+
+#calculate top 20 vars
+vars.or=apply(exprs.or,1,var)
+select.2=order(vars.or,decreasing=T)[1:20]
+
+heatmap.2(as.matrix(exprs.or[select.2,]),trace="none", ColSideColors=c("violetred", "violetred"),margins=c(7,7),Rowv=F,Colv=F, main="top 20 genes, oral")
+```
+From this initial analysis, it appears that my hypothesis may actually be correct in predicting that similar genes are highly expressed between breast and ovarian cancer samples, as compared to oral cancer samples. The genes in particular ILMN_1687384, ILMN_2075334; are highly expressed here but not in the test samples, and the genes previously identified in the breast/ovarian group are not seen here.
+```{r}
+#function from notes to create vector of red/green gradient
+redgreen <- function(n) {
+  c(hsv(h=2/6, v=seq(1,0,length=n/2) ), hsv(h=0/6, v=seq(0,1,length=n/2)) )
+}
+
+#heatmaps of top 100 genes: breast samples
+select.3=order(vars.br.ov,decreasing=T)[1:100]
+
+#both
+heatmap.2(as.matrix(exprs.br.ov[select.3,]),trace="none", labRow=F,
+col=redgreen(100),scale="row",
+ColSideColors=c("pink","pink","pink","turquoise","turquoise","turquoise","turquoise","turquoise","turquoise"),margins=c(7,7),distfun=corr.dist)
+#breast
+heatmap.2(as.matrix(exprs.br.ov[select.3,1:3]),trace="none", labRow=F,
+col=redgreen(100),scale="row",
+ColSideColors=c("pink","pink","pink"),margins=c(7,7),distfun=corr.dist)
+#ovarian
+heatmap.2(as.matrix(exprs.br.ov[select.3,4:9]),trace="none", labRow=F,
+col=redgreen(100),scale="row",
+ColSideColors=c("turquoise","turquoise","turquoise","turquoise","turquoise","turquoise"),margins=c(7,7),distfun=corr.dist)
+```
+Again, the combined heatmap does not do much since there is a huge gap between values, this could have been due to different experimental conditions, background noise, etc. The individual heatmaps are not so useful, since they seem to be comparing individual samples together instead of treating them as one. I think that in order to accurately compare this data the values should be better adjusted.
+```{r}
+#clean up annotation table that we retrieved earlier:
+annot.br.ov <- subset(Table(annot.ovarian), ID=rownames(exprs.br.ov), select=c("ID", "Gene symbol", "Gene title"))
+annot.br.ov[select.1,]
+annot.br.ov[select.2,]
+```
+The annotations of the top 20 genes in either the test or "control" group are not very useful, and I was expecting BRCA1 or BRCA2 to be present in the top genes for the test group.
+
+I was curious to see how highly the BRCA1 and BRCA2 genes were expressed relative to the mean expression in all groups, so I backtracked a bit to make these calculations.
+```{r}
+#find illumina IDs for BRCA1 and BRCA2
+annot.br.ov[annot.br.ov$"Gene symbol"=="BRCA1",]
+annot.br.ov[annot.br.ov$"Gene symbol"=="BRCA2",]
+
+#average expression level of both BRCA1 ID in breast cells (seen as red line in plots)
+rowMeans(exprs.br.ov["ILMN_2311089",1:3])
+rowMeans(exprs.br.ov["ILMN_1738027",1:3])
+#ovarian
+rowMeans(exprs.br.ov["ILMN_2311089",4:9])
+rowMeans(exprs.br.ov["ILMN_1738027",4:9])
+
+#average expression level of BRCA2 (seen as blue line in plots)
+rowMeans(exprs.br.ov["ILMN_1677794",1:3])
+rowMeans(exprs.br.ov["ILMN_1677794",4:9])
+
+#expression of BRCA1 and BRCA2 in oral (control) cells
+exprs.or["ILMN_2311089",]
+exprs.or["ILMN_1738027",]
+exprs.or["ILMN_1677794",]
+
+```
+```{r}
+plot(rowMeans(exprs.br.ov[select.3,1:3]), main="average expression levels of breast cells in top 100 genes")
+abline(a=2.932, b=0, col="red")
+abline(a=3.001, b=0, col="red")
+abline(a=2.696, b=0, col="blue")
+
+plot(rowMeans(exprs.br.ov[select.3,4:9]), main="average expression levels of ovarian cells in top 100 genes")
+abline(a=7.242, b=0, col="red")
+abline(a=7.549, b=0, col="red")
+abline(a=5.908, b=0, col="blue")
+
+select.4=order(vars.or,decreasing=T)[1:100]
+
+plot(exprs.or[select.4,1], main="average expression levels of control cells in top 100 genes")
+abline(a=6.901615, b=0, col="red")
+abline(a=7.317883 , b=0, col="red")
+abline(a=6.114542, b=0, col="blue")
+```
+From these plots, it seems that BRCA1 and BRCA2 are not expressed significantly high in the breast or ovarian samples, yet it is expressed similarly to the top 100 genes in the control group. I would infer from this observation that a gene's significance in cancer risk is not necessarily correlated with it's expression level. 
+
+In conclusion, I found that similar top genes are present in breast and ovarian cancer cell lines, as compared to a control cancer cell line. 
+
+If I were to continue this project further, I would want to try to adjust the values between the breast and ovarian samples in order to create a more equal comparison between expression. Also, I think it may be a good idea to compare the findings to healthy breast/ovarian tissue, or to look at downregulated genes in the cancer cell line instead of only looking at top genes. 
+
+
+
+
+Works Cited:
+
+American Cancer Society: Ovarian Cancer Risk Factors - https://www.cancer.org/cancer/ovarian-cancer/causes-risks-prevention/risk-factors.html
+
+Davis S, Meltzer P (2007). “GEOquery: a bridge between the Gene Expression Omnibus (GEO) and BioConductor.” Bioinformatics, 14, 1846–1847.
+
+Lee CH, Wong TS, Chan JY, Lu SC et al. Epigenetic regulation of the X-linked tumour suppressors BEX1 and LDOC1 in oral squamous cell carcinoma. J Pathol 2013 Jul;230(3):298-309. PMID: 23362108
+
+Sims AH, Zweemer AJ, Nagumo Y, Faratian D et al. Defining the molecular response to trastuzumab, pertuzumab and combination therapy in ovarian cancer. Br J Cancer 2012 May 22;106(11):1779-89. PMID: 22549178
+	
+Wade MA, Jones D, Wilson L, Stockley J et al. The histone demethylase enzyme KDM3A is a key estrogen receptor regulator in breast cancer. Nucleic Acids Res 2015 Jan;43(1):196-207. PMID: 25488809
